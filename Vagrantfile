@@ -22,9 +22,11 @@ CLOUD_CONFIG_PATH = File.join(File.dirname(__FILE__), "user-data")
 IGNITION_CONFIG_PATH = File.join(File.dirname(__FILE__), "config.ign")
 CONFIG = File.join(File.dirname(__FILE__), "config.rb")
 
+
 # Defaults for config options defined in CONFIG
-$num_instances = 1
-$instance_name_prefix = "core"
+$etcd_cluster_size = 3
+$etcd_instance_name_prefix = "etcd"
+
 $enable_serial_logging = false
 $share_home = false
 $vm_gui = false
@@ -34,10 +36,10 @@ $vb_cpuexecutioncap = 100
 $shared_folders = {}
 $forwarded_ports = {}
 
-# Attempt to apply the deprecated environment variable NUM_INSTANCES to
-# $num_instances while allowing config.rb to override it
-if ENV["NUM_INSTANCES"].to_i > 0 && ENV["NUM_INSTANCES"]
-  $num_instances = ENV["NUM_INSTANCES"].to_i
+# Attempt to apply the deprecated environment variable ETCD_CLUSTER_SIZE to
+# $etcd_cluster_size while allowing config.rb to override it
+if ENV["ETCD_CLUSTER_SIZE"].to_i > 0 && ENV["ETCD_CLUSTER_SIZE"]
+  $etcd_cluster_size = ENV["ETCD_CLUSTER_SIZE"].to_i
 end
 
 if File.exist?(CONFIG)
@@ -56,6 +58,10 @@ end
 def vm_cpus
   $vb_cpus.nil? ? $vm_cpus : $vb_cpus
 end
+
+#Create etcd ignition config file
+ETCD_IGNITION_CONFIG_PATH = "etcd_config.ign"
+File.write(ETCD_IGNITION_CONFIG_PATH,`./generate_etcd_ignition_config.sh vagrant-virtualbox #{$etcd_cluster_size}` )
 
 Vagrant.configure("2") do |config|
   # always use Vagrants insecure key
@@ -86,8 +92,8 @@ Vagrant.configure("2") do |config|
     config.vbguest.auto_update = false
   end
 
-  (1..$num_instances).each do |i|
-    config.vm.define vm_name = "%s-%02d" % [$instance_name_prefix, i] do |config|
+  (1..$etcd_cluster_size).each do |i|
+    config.vm.define vm_name = "%s-%02d" % [$etcd_instance_name_prefix, i] do |config|
       config.vm.hostname = vm_name
 
       if $enable_serial_logging
@@ -163,8 +169,8 @@ Vagrant.configure("2") do |config|
         config.ignition.drive_name = "config" + i.to_s
         # when the ignition config doesn't exist, the plugin automatically generates a very basic Ignition with the ssh key
         # and previously specified options (ip and hostname). Otherwise, it appends those to the provided config.ign below
-        if File.exist?(IGNITION_CONFIG_PATH)
-          config.ignition.path = 'config.ign'
+        if File.exist?(ETCD_IGNITION_CONFIG_PATH)
+          config.ignition.path = ETCD_IGNITION_CONFIG_PATH
         end
       end
     end
