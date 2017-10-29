@@ -22,11 +22,29 @@ CLOUD_CONFIG_PATH = File.join(File.dirname(__FILE__), "user-data")
 IGNITION_CONFIG_PATH = File.join(File.dirname(__FILE__), "config.ign")
 CONFIG = File.join(File.dirname(__FILE__), "config.rb")
 
-
-# Defaults for config options defined in CONFIG
+def etcdIP(num)
+  return "172.17.8.#{num+100}"
+end
 $etcd_cluster_size = 3
 $etcd_instance_name_prefix = "etcd"
+etcd_endpoints = (1..$etcd_cluster_size).map { |i| ip=etcdIP(i); "http://#{ip}:2379" }
 
+def controllerIP(num)
+  return "172.17.4.#{num+100}"
+end
+controller_cluster_size = 1
+controller_instance_name_prefix = "controller"
+master_host = controllerIP(1) # Hardcoded to the first controller. TODO: Put controllers behind a routable IP.
+
+def workerIP(num)
+  return "172.17.4.#{num+200}"
+end
+worker_cluster_size = 2
+worker_instance_name_prefix = "worker"
+
+
+
+# Defaults for config options defined in CONFIG
 $enable_serial_logging = false
 $share_home = false
 $vm_gui = false
