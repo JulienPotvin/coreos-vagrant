@@ -12,3 +12,4 @@ etcd_config.ign.merged
 *.img
 
 ct
+ssl/

@@ -42,6 +42,12 @@ end
 worker_cluster_size = 2
 worker_instance_name_prefix = "worker"
 
+# Generate root CA
+system("mkdir -p ssl && ./lib/init-ssl-ca ssl") or abort ("failed generating SSL artifacts")
+
+# Generate admin key/cert
+# TODO: make sure the superfluous CNF template > config file is not interfering
+system("./lib/init-ssl ssl admin kube-admin") or abort("failed generating admin SSL artifacts")
 
 
 # Defaults for config options defined in CONFIG
