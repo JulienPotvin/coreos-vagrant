@@ -2,14 +2,11 @@
 log/
 user-data
 config.rb
-config.ign
-config.ign.merged
-
-etcd_config.ign
-etcd_config.ign.merged
-
+*.ign
+*.ign.merged
 *.vmdk
 *.img
 
 ct
 ssl/
+trash/kubectl

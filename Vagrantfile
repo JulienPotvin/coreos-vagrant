@@ -1,6 +1,12 @@
 # -*- mode: ruby -*-
 # # vi: set ft=ruby :
 
+#This installer is built using the now defunct coreos tutorials.
+#They're still available on web cache : https://web.archive.org/web/20170904114419/https://coreos.com/kubernetes/docs/latest/getting-started.html
+#TODO: deploy worker
+#TODO: register kubelet
+#TODO: push addons with kubelet(dns, heapster, dashboard, [kubeless])
+
 require 'fileutils'
 
 Vagrant.require_version ">= 1.6.0"
@@ -22,6 +28,9 @@ CLOUD_CONFIG_PATH = File.join(File.dirname(__FILE__), "user-data")
 IGNITION_CONFIG_PATH = File.join(File.dirname(__FILE__), "config.ign")
 CONFIG = File.join(File.dirname(__FILE__), "config.rb")
 
+#Hardcoded IPs
+K8S_SERVICE_IP = "10.3.0.1"
+
 def etcdIP(num)
   return "172.17.8.#{num+100}"
 end
@@ -30,11 +39,14 @@ $etcd_instance_name_prefix = "etcd"
 etcd_endpoints = (1..$etcd_cluster_size).map { |i| ip=etcdIP(i); "http://#{ip}:2379" }
 
 def controllerIP(num)
-  return "172.17.4.#{num+100}"
+  return "172.17.8.#{num+200}"
 end
 controller_cluster_size = 1
 controller_instance_name_prefix = "controller"
+controller_vm_memory = 4096
+controller_vm_cpus = 2
 master_host = controllerIP(1) # Hardcoded to the first controller. TODO: Put controllers behind a routable IP.
+controller_ips = (1..controller_cluster_size).map { |i| controllerIP(i) }
 
 def workerIP(num)
   return "172.17.4.#{num+200}"
@@ -42,6 +54,7 @@ end
 worker_cluster_size = 2
 worker_instance_name_prefix = "worker"
 
+#TODO: Avoid that every vagrant command triggers a new key generation
 # Generate root CA
 system("mkdir -p ssl && ./lib/init-ssl-ca ssl") or abort ("failed generating SSL artifacts")
 
@@ -49,6 +62,14 @@ system("mkdir -p ssl && ./lib/init-ssl-ca ssl") or abort ("failed generating SSL
 # TODO: make sure the superfluous CNF template > config file is not interfering
 system("./lib/init-ssl ssl admin kube-admin") or abort("failed generating admin SSL artifacts")
 
+
+def provisionMachineSSL(machine,certBaseName,cn,ipAddrs)
+  tarFile = "ssl/#{cn}.tar"
+  ipString = ipAddrs.map.with_index { |ip, i| "IP.#{i+1}=#{ip}"}.join(",")
+  system("./lib/init-ssl ssl #{certBaseName} #{cn} #{ipString}") or abort("failed generating #{cn} SSL artifacts")
+  machine.vm.provision :file, :source => tarFile, :destination => "/tmp/ssl.tar"
+  machine.vm.provision :shell, :inline => "mkdir -p /etc/kubernetes/ssl && tar -C /etc/kubernetes/ssl -xf /tmp/ssl.tar", :privileged => true
+end
 
 # Defaults for config options defined in CONFIG
 $enable_serial_logging = false
@@ -86,6 +107,7 @@ end
 #Create etcd ignition config file
 ETCD_IGNITION_CONFIG_PATH = "etcd_config.ign"
 File.write(ETCD_IGNITION_CONFIG_PATH,`./generate_etcd_ignition_config.sh vagrant-virtualbox #{$etcd_cluster_size}` )
+CONTROLLER_IGNITION_CONFIG_PATH = "controller/controller_config.ign"
 
 Vagrant.configure("2") do |config|
   # always use Vagrants insecure key
@@ -197,6 +219,50 @@ Vagrant.configure("2") do |config|
           config.ignition.path = ETCD_IGNITION_CONFIG_PATH
         end
       end
+    end
+  end #of etcd cluster
+
+  (1..controller_cluster_size).each do |controller_i|
+    config.vm.define vm_name = "%s-%02d" % [controller_instance_name_prefix, controller_i] do |controller|
+      controller.vm.hostname = vm_name
+
+      controller.vm.provider :virtualbox do |vb|
+        vb.gui = vm_gui
+        vb.memory = controller_vm_memory
+        vb.cpus = controller_vm_cpus
+        vb.customize ["modifyvm", :id, "--cpuexecutioncap", "#{$vb_cpuexecutioncap}"]
+        controller.ignition.config_obj = vb
+      end
+
+
+      controller_IP = controllerIP(controller_i)
+      controller.vm.network :private_network, ip: controller_IP
+
+      #ignition stuff
+      controller.ignition.enabled = true
+      controller.ignition.ip = controller_IP
+      controller.ignition.hostname = vm_name
+      controller.ignition.drive_name = "controller_config" + controller_i.to_s # TODO: validate there is no convention on 'config'
+      
+
+      # Each controller gets the same cert
+      provisionMachineSSL(config,"apiserver","kube-apiserver-#{controller_IP}",controller_ips << K8S_SERVICE_IP)
+
+      env_file = Tempfile.new('env_file', :binmode => true)
+      env_file.write("ETCD_ENDPOINTS=#{etcd_endpoints.join(',')}\nADVERTISE_IP=#{controller_IP}\n")
+      env_file.close
+      controller.vm.provision :file, :source => env_file, :destination => "/tmp/coreos-kube-options.env"
+      controller.vm.provision :shell, :inline => "mkdir -p /run/coreos-kubernetes && mv /tmp/coreos-kube-options.env /run/coreos-kubernetes/options.env", :privileged => true
+
+      # system("mkdir trash && curl -o trash/controller-install.sh https://raw.githubusercontent.com/coreos/coreos-kubernetes/master/multi-node/generic/controller-install.sh")
+      # controller.vm.provision :file, :source => "trash/controller-install.sh", :destination => "/tmp/vagrantfile-user-data"
+      # controller.vm.provision :shell, :inline => "mkdir -p /var/lib/coreos-vagrant && mv /tmp/vagrantfile-user-data /var/lib/coreos-vagrant/", :privileged => true
+
+      #TODO: go ignition all the way. The above script is not automatically run on the vm...
+      File.write('./controller/options.env', "ETCD_ENDPOINTS=#{etcd_endpoints.join(',')}\nADVERTISE_IP=#{controller_IP}\n")
+      File.write(CONTROLLER_IGNITION_CONFIG_PATH, `./controller/build_master_cl_config.sh | ./ct --platform=vagrant-virtualbox --pretty`)
+      controller.ignition.path = CONTROLLER_IGNITION_CONFIG_PATH
+
     end
   end
 end
