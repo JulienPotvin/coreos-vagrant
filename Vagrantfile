@@ -3,9 +3,9 @@
 
 #This installer is built using the now defunct coreos tutorials.
 #They're still available on web cache : https://web.archive.org/web/20170904114419/https://coreos.com/kubernetes/docs/latest/getting-started.html
-#TODO: deploy worker
 #TODO: register kubelet
 #TODO: push addons with kubelet(dns, heapster, dashboard, [kubeless])
+#TODO: Ensure flannel is working (https://github.com/coreos/flannel/issues/216)
 
 require 'fileutils'
 
@@ -43,15 +43,17 @@ def controllerIP(num)
 end
 controller_cluster_size = 1
 controller_instance_name_prefix = "controller"
-controller_vm_memory = 4096
-controller_vm_cpus = 2
+controller_vm_memory = 1024
+controller_vm_cpus = 1
 master_host = controllerIP(1) # Hardcoded to the first controller. TODO: Put controllers behind a routable IP.
 controller_ips = (1..controller_cluster_size).map { |i| controllerIP(i) }
 
 def workerIP(num)
-  return "172.17.4.#{num+200}"
+  return "172.17.8.#{num+50}"
 end
 worker_cluster_size = 2
+worker_vm_memory = 1024
+worker_vm_cpus = 1
 worker_instance_name_prefix = "worker"
 
 #TODO: Avoid that every vagrant command triggers a new key generation
@@ -75,7 +77,7 @@ end
 $enable_serial_logging = false
 $share_home = false
 $vm_gui = false
-$vm_memory = 1024
+$vm_memory = 512
 $vm_cpus = 1
 $vb_cpuexecutioncap = 100
 $shared_folders = {}
@@ -108,6 +110,7 @@ end
 ETCD_IGNITION_CONFIG_PATH = "etcd_config.ign"
 File.write(ETCD_IGNITION_CONFIG_PATH,`./generate_etcd_ignition_config.sh vagrant-virtualbox #{$etcd_cluster_size}` )
 CONTROLLER_IGNITION_CONFIG_PATH = "controller/controller_config.ign"
+WORKER_IGNITION_CONFIG_PATH = "worker/worker_config.ign"
 
 Vagrant.configure("2") do |config|
   # always use Vagrants insecure key
@@ -247,7 +250,7 @@ Vagrant.configure("2") do |config|
 
       # Each controller gets the same cert
       provisionMachineSSL(config,"apiserver","kube-apiserver-#{controller_IP}",controller_ips << K8S_SERVICE_IP)
-
+      # TODO: test removal
       env_file = Tempfile.new('env_file', :binmode => true)
       env_file.write("ETCD_ENDPOINTS=#{etcd_endpoints.join(',')}\nADVERTISE_IP=#{controller_IP}\n")
       env_file.close
@@ -264,5 +267,49 @@ Vagrant.configure("2") do |config|
       controller.ignition.path = CONTROLLER_IGNITION_CONFIG_PATH
 
     end
-  end
+  end # of master cluster
+
+  (1..worker_cluster_size).each do |worker_i|
+    config.vm.define vm_name = "w%d" % worker_i do |worker|
+      worker.vm.hostname = vm_name
+
+      worker.vm.provider :virtualbox do |vb|
+        vb.gui = vm_gui
+        vb.memory = worker_vm_memory
+        vb.cpus = worker_vm_cpus
+        vb.customize ["modifyvm", :id, "--cpuexecutioncap", "#{$vb_cpuexecutioncap}"]
+        worker.ignition.config_obj = vb
+      end
+
+      worker_IP = workerIP(worker_i)
+      worker.vm.network :private_network, ip: worker_IP
+
+      #ignition stuff
+      worker.ignition.enabled = true
+      worker.ignition.ip = worker_IP
+      worker.ignition.hostname = vm_name
+      worker.ignition.drive_name = "worker_config" + worker_i.to_s
+
+      provisionMachineSSL(worker,"worker","kube-worker-#{worker_IP}",[worker_IP])
+
+      # TODO: test removal
+      env_file = Tempfile.new('env_file', :binmode => true)
+      env_file.write("ETCD_ENDPOINTS=#{etcd_endpoints.join(',')}\nMASTER_ENDPOINT=https://#{master_host}\nADVERTISE_IP=#{worker_IP}\n")#TODO(aaron): LB or DNS across control nodes
+      env_file.close
+      worker.vm.provision :file, :source => env_file, :destination => "/tmp/coreos-kube-options.env"
+      worker.vm.provision :shell, :inline => "mkdir -p /run/coreos-kubernetes && mv /tmp/coreos-kube-options.env /run/coreos-kubernetes/options.env", :privileged => true
+
+      # worker.vm.provision :file, :source => WORKER_CLOUD_CONFIG_PATH, :destination => "/tmp/vagrantfile-user-data"
+      # worker.vm.provision :shell, :inline => "mv /tmp/vagrantfile-user-data /var/lib/coreos-vagrant/", :privileged => true
+
+      #ignition config
+      File.write('./worker/options.env', "ETCD_ENDPOINTS=#{etcd_endpoints.join(',')}\nMASTER_ENDPOINT=https://#{master_host}\nADVERTISE_IP=#{worker_IP}\n")
+      #TODO: Create worker_cl_config.template and build_worker_cl_config.sh
+      config_path = "#{WORKER_IGNITION_CONFIG_PATH}-#{worker_i}"
+      File.write(config_path, `./worker/build_worker_cl_config.sh | ./ct --platform=vagrant-virtualbox --pretty`)
+      worker.ignition.path = config_path
+
+    end
+  end #of worker cluster
+
 end

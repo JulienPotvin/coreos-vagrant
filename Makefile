@@ -8,3 +8,6 @@ etcd:
 
 master:
 	vagrant destroy -f  && vagrant reload && vagrant up && vagrant ssh controller-01
+
+w1:
+	vagrant destroy -f && vagrant reload && vagrant up && vagrant ssh w1

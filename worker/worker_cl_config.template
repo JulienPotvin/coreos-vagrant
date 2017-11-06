@@ -1,0 +1,174 @@
+storage:
+  files:
+    # host rkt stuff -- Try dropping it
+    - path: "/opt/bin/host-rkt"
+      filesystem: root
+      contents:
+        inline: |
+          #!/bin/sh
+          # This is bind mounted into the kubelet rootfs and all rkt shell-outs go
+          # through this rkt wrapper. It essentially enters the host mount namespace
+          # (which it is already in) only for the purpose of breaking out of the chroot
+          # before calling rkt. It makes things like rkt gc work and avoids bind mounting
+          # in certain rkt filesystem dependancies into the kubelet rootfs. This can
+          # eventually be obviated when the write-api stuff gets upstream and rkt gc is
+          # through the api-server. Related issue:
+          # https://github.com/coreos/rkt/issues/2878
+          exec nsenter -m -u -i -n -p -t 1 -- /usr/bin/rkt "\$@"
+      mode: 0744
+    # Network related files
+    - path: "/etc/systemd/system/docker.service.d/40-flannel.conf"
+      filesystem: root
+      contents:
+        inline: |
+          [Unit]
+          Requires=flanneld.service
+          After=flanneld.service
+          [Service]
+          EnvironmentFile=/etc/kubernetes/cni/docker_opts_cni.env
+      mode: 0644
+    - path: "/etc/kubernetes/cni/docker_opts_cni.env"
+      filesystem: root
+      contents:
+        inline: |
+          DOCKER_OPT_BIP=""
+          DOCKER_OPT_IPMASQ=""
+      mode: 0644
+    - path: "/etc/kubernetes/cni/net.d/10-flannel.conf"
+      filesystem: root
+      contents:
+        inline: |
+          {
+              "name": "podnet",
+              "type": "flannel",
+              "delegate": {
+                  "isDefaultGateway": true
+              }
+          }
+      mode: 0644
+    # kube proxy
+    - path: "/etc/kubernetes/worker-kubeconfig.yaml"
+      filesystem: root
+      contents:
+        inline: |
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - name: local
+            cluster:
+              certificate-authority: /etc/kubernetes/ssl/ca.pem
+          users:
+          - name: kubelet
+            user:
+              client-certificate: /etc/kubernetes/ssl/worker.pem
+              client-key: /etc/kubernetes/ssl/worker-key.pem
+          contexts:
+          - context:
+              cluster: local
+              user: kubelet
+            name: kubelet-context
+          current-context: kubelet-context
+      mode: 0644
+    - path: "/etc/kubernetes/manifests/kube-proxy.yaml"
+      filesystem: root
+      contents:
+        inline: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: kube-proxy
+            namespace: kube-system
+            annotations:
+              rkt.alpha.kubernetes.io/stage1-name-override: coreos.com/rkt/stage1-fly
+          spec:
+            hostNetwork: true
+            containers:
+            - name: kube-proxy
+              image: ${HYPERKUBE_IMAGE_REPO}:${K8S_VER}
+              command:
+              - /hyperkube
+              - proxy
+              - --master=${MASTER_ENDPOINT}
+              - --cluster-cidr=${POD_NETWORK}
+              - --kubeconfig=/etc/kubernetes/worker-kubeconfig.yaml
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /etc/ssl/certs
+                name: "ssl-certs"
+              - mountPath: /etc/kubernetes/worker-kubeconfig.yaml
+                name: "kubeconfig"
+                readOnly: true
+              - mountPath: /etc/kubernetes/ssl
+                name: "etc-kube-ssl"
+                readOnly: true
+              - mountPath: /var/run/dbus
+                name: dbus
+                readOnly: false
+            volumes:
+            - name: "ssl-certs"
+              hostPath:
+                path: "/usr/share/ca-certificates"
+            - name: "kubeconfig"
+              hostPath:
+                path: "/etc/kubernetes/worker-kubeconfig.yaml"
+            - name: "etc-kube-ssl"
+              hostPath:
+                path: "/etc/kubernetes/ssl"
+            - hostPath:
+                path: /var/run/dbus
+              name: dbus
+      mode: 0644
+systemd:
+  units:
+    - name: flanneld.service
+      enable: true
+      dropins:
+        - name: 50-network-config.conf
+          contents: |
+            [Service]
+            Environment=FLANNELD_IFACE=${ADVERTISE_IP}
+            Environment=FLANNELD_ETCD_ENDPOINTS=${ETCD_ENDPOINTS}
+    - name: kubelet.service
+      enable: true
+      contents: |
+        [Service]
+        Environment=KUBELET_IMAGE_TAG=${K8S_VER}
+        Environment=KUBELET_IMAGE_URL=${HYPERKUBE_IMAGE_REPO}
+        Environment="RKT_RUN_ARGS=--uuid-file-save=/var/run/kubelet-pod.uuid \
+          --volume dns,kind=host,source=/etc/resolv.conf \
+          --mount volume=dns,target=/etc/resolv.conf \
+          --volume rkt,kind=host,source=/opt/bin/host-rkt \
+          --mount volume=rkt,target=/usr/bin/rkt \
+          --volume var-lib-rkt,kind=host,source=/var/lib/rkt \
+          --mount volume=var-lib-rkt,target=/var/lib/rkt \
+          --volume stage,kind=host,source=/tmp \
+          --mount volume=stage,target=/tmp \
+          --volume var-log,kind=host,source=/var/log \
+          --mount volume=var-log,target=/var/log"
+        ExecStartPre=/usr/bin/mkdir -p /etc/kubernetes/manifests
+        ExecStartPre=/usr/bin/mkdir -p /var/log/containers
+        #ExecStartPre=-/usr/bin/rkt rm --uuid-file=/var/run/kubelet-pod.uuid
+        ExecStartPre=/usr/bin/mkdir -p /opt/cni/bin
+        ExecStart=/usr/lib/coreos/kubelet-wrapper \
+          --api-servers=${MASTER_ENDPOINT} \
+          --cni-conf-dir=/etc/kubernetes/cni/net.d \
+          --network-plugin=cni \
+          --container-runtime=docker \
+          --rkt-path=/usr/bin/rkt \
+          --rkt-stage1-image=coreos.com/rkt/stage1-coreos \
+          --register-node=true \
+          --allow-privileged=true \
+          --pod-manifest-path=/etc/kubernetes/manifests \
+          --hostname-override=${ADVERTISE_IP} \
+          --cluster_dns=${DNS_SERVICE_IP} \
+          --cluster_domain=cluster.local \
+          --kubeconfig=/etc/kubernetes/worker-kubeconfig.yaml \
+          --tls-cert-file=/etc/kubernetes/ssl/worker.pem \
+          --tls-private-key-file=/etc/kubernetes/ssl/worker-key.pem
+        ExecStop=-/usr/bin/rkt stop --uuid-file=/var/run/kubelet-pod.uuid
+        Restart=always
+        RestartSec=10
+
+        [Install]
+        WantedBy=multi-user.target
