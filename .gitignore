@@ -2,11 +2,10 @@
 log/
 user-data
 config.rb
-*.ign
-*.ign.merged
+*.ign*
 *.vmdk
 *.img
 
 ct
 ssl/
-trash/kubectl
+*/options.env

@@ -3,7 +3,6 @@
 
 #This installer is built using the now defunct coreos tutorials.
 #They're still available on web cache : https://web.archive.org/web/20170904114419/https://coreos.com/kubernetes/docs/latest/getting-started.html
-#TODO: register kubelet
 #TODO: push addons with kubelet(dns, heapster, dashboard, [kubeless])
 #TODO: Ensure flannel is working (https://github.com/coreos/flannel/issues/216)
 
